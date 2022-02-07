@@ -998,10 +998,13 @@ class TransformerWrapper(nn.Module):
         self.shift_mem_down = shift_mem_down
 
         self.token_emb = nn.Embedding(num_tokens, emb_dim)
+        self.bigram_emb = nn.Embedding(num_tokens * num_tokens, emb_dim)
+
+        self.project_emb = nn.Linear(emb_dim * 2, emb_dim)
+
         self.pos_emb = AbsolutePositionalEmbedding(emb_dim, max_seq_len) if (use_pos_emb and not attn_layers.has_pos_emb) else always(0)
         self.emb_dropout = nn.Dropout(emb_dropout)
 
-        self.project_emb = nn.Linear(emb_dim, dim) if emb_dim != dim else nn.Identity()
         self.attn_layers = attn_layers
         self.norm = nn.LayerNorm(dim)
 
@@ -1029,11 +1032,18 @@ class TransformerWrapper(nn.Module):
         **kwargs
     ):
         b, n, device, num_mem = *x.shape, x.device, self.num_memory_tokens
-        x = self.token_emb(x)
+
+        unigram = self.token_emb(x)
+
+        bigram_ids = x[:, :-1] * 256 + x[:, 1:]
+        bigram = self.bigram_emb(bigram_ids)
+        bigram = F.pad(bigram, (0, 0, 1, 0), value = 0.)
+
+        x = torch.cat((unigram, bigram), dim = -1)
+        x = self.project_emb(x)
+
         x = x + self.pos_emb(x)
         x = self.emb_dropout(x)
-
-        x = self.project_emb(x)
 
         if num_mem > 0:
             mem = repeat(self.memory_tokens, 'n d -> b n d', b = b)

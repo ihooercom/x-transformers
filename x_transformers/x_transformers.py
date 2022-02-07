@@ -997,12 +997,24 @@ class TransformerWrapper(nn.Module):
         self.max_mem_len = max_mem_len
         self.shift_mem_down = shift_mem_down
 
-        self.token_emb = nn.Embedding(num_tokens, emb_dim)
-        self.bigram_emb = nn.Embedding(num_tokens * num_tokens, emb_dim)
+        self.token_emb = nn.Embedding(num_tokens, emb_dim // 4)
 
-        self.project_emb = nn.Linear(emb_dim * 2, emb_dim)
+        import sympy
+        bigram_vocab_size = 8000
+        self.bigram_vocab_size = bigram_vocab_size
+        self.prime = next(sympy.primerange(bigram_vocab_size + 1, bigram_vocab_size * 2))
+        self.bigram_emb = nn.Embedding(bigram_vocab_size, emb_dim // 4)
 
-        self.pos_emb = AbsolutePositionalEmbedding(emb_dim, max_seq_len) if (use_pos_emb and not attn_layers.has_pos_emb) else always(0)
+        trigram_vocab_size = 16000
+        self.trigram_vocab_size = trigram_vocab_size
+        self.trigram_prime = next(sympy.primerange(trigram_vocab_size + 1, trigram_vocab_size * 2))
+        self.trigram_emb = nn.Embedding(trigram_vocab_size, emb_dim // 2)
+
+        # self.project_emb = nn.Linear(emb_dim * 2, emb_dim)
+
+        self.token_pos_emb = AbsolutePositionalEmbedding(emb_dim // 4, max_seq_len) if (use_pos_emb and not attn_layers.has_pos_emb) else always(0)
+        self.bigram_pos_emb = AbsolutePositionalEmbedding(emb_dim // 4 ,max_seq_len) if (use_pos_emb and not attn_layers.has_pos_emb) else always(0)
+        self.trigram_pos_emb = AbsolutePositionalEmbedding(emb_dim // 2, max_seq_len) if (use_pos_emb and not attn_layers.has_pos_emb) else always(0)
         self.emb_dropout = nn.Dropout(emb_dropout)
 
         self.attn_layers = attn_layers
@@ -1036,14 +1048,20 @@ class TransformerWrapper(nn.Module):
         unigram = self.token_emb(x)
 
         bigram_ids = x[:, :-1] * 256 + x[:, 1:]
+        bigram_ids = (bigram_ids + 1) % self.prime % self.bigram_vocab_size
         bigram = self.bigram_emb(bigram_ids)
         bigram = F.pad(bigram, (0, 0, 1, 0), value = 0.)
 
-        x = torch.cat((unigram, bigram), dim = -1)
-        x = self.project_emb(x)
+        trigram_ids = x[:, :-2] * 256 * 256 + x[:, 1:-1] * 256 + x[:, 2:]
+        trigram_ids = (trigram_ids + 1) % self.trigram_prime % self.trigram_vocab_size
+        trigram = self.trigram_emb(trigram_ids)
+        trigram = F.pad(trigram, (0, 0, 2, 0), value = 0.)
 
-        x = x + self.pos_emb(x)
-        x = self.emb_dropout(x)
+        unigram = unigram + self.token_pos_emb(unigram)
+        bigram = bigram + self.bigram_pos_emb(bigram)
+        trigram = trigram + self.trigram_pos_emb(trigram)
+
+        x = torch.cat((unigram, bigram, trigram), dim = -1)
 
         if num_mem > 0:
             mem = repeat(self.memory_tokens, 'n d -> b n d', b = b)

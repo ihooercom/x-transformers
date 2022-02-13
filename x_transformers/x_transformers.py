@@ -110,6 +110,7 @@ class AbsolutePositionalEmbedding(nn.Module):
         self.scale = dim ** -0.5
         self.emb = nn.Embedding(max_seq_len, dim)
 
+
     def forward(self, x):
         n = torch.arange(x.shape[1], device = x.device)
         pos_emb = self.emb(n)
@@ -1007,6 +1008,9 @@ class TransformerWrapper(nn.Module):
 
         self.init_()
 
+        self.token_norm = nn.LayerNorm(dim)
+        self.pos_norm = nn.LayerNorm(dim)
+
         self.to_logits = nn.Linear(dim, num_tokens) if not tie_embedding else lambda t: t @ self.token_emb.weight.t()
 
         # memory tokens (like [cls]) from Memory Transformers paper
@@ -1016,7 +1020,8 @@ class TransformerWrapper(nn.Module):
             self.memory_tokens = nn.Parameter(torch.randn(num_memory_tokens, dim))
 
     def init_(self):
-        nn.init.kaiming_normal_(self.token_emb.weight)
+        nn.init.normal_(self.token_emb.weight, std = 1e-5)
+        nn.init.normal_(self.pos_emb.emb.weight, std = 1e-5)
 
     def forward(
         self,
@@ -1029,8 +1034,11 @@ class TransformerWrapper(nn.Module):
         **kwargs
     ):
         b, n, device, num_mem = *x.shape, x.device, self.num_memory_tokens
-        x = self.token_emb(x)
-        x = x + self.pos_emb(x)
+        token_emb = self.token_emb(x)
+        pos_emb = self.pos_emb(x)
+
+        x = self.token_norm(token_emb) + self.pos_norm(pos_emb)
+
         x = self.emb_dropout(x)
 
         x = self.project_emb(x)

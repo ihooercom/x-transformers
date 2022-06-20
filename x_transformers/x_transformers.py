@@ -17,99 +17,122 @@ from x_transformers.autoregressive_wrapper import AutoregressiveWrapper
 
 DEFAULT_DIM_HEAD = 64
 
-Intermediates = namedtuple('Intermediates', [
-    'pre_softmax_attn',
-    'post_softmax_attn'
-])
+Intermediates = namedtuple('Intermediates', ['pre_softmax_attn', 'post_softmax_attn'])
 
-LayerIntermediates = namedtuple('Intermediates', [
-    'hiddens',
-    'attn_intermediates'
-])
+LayerIntermediates = namedtuple('Intermediates', ['hiddens', 'attn_intermediates'])
 
 # helpers
 
+
 def exists(val):
     return val is not None
+
 
 def default(val, d):
     if exists(val):
         return val
     return d() if isfunction(d) else d
 
+
 def cast_tuple(val, depth):
     return val if isinstance(val, tuple) else (val,) * depth
 
+
 class always():
+
     def __init__(self, val):
         self.val = val
+
     def __call__(self, *args, **kwargs):
         return self.val
 
+
 class not_equals():
+
     def __init__(self, val):
         self.val = val
+
     def __call__(self, x, *args, **kwargs):
         return x != self.val
 
+
 class equals():
+
     def __init__(self, val):
         self.val = val
+
     def __call__(self, x, *args, **kwargs):
         return x == self.val
+
 
 def max_neg_value(tensor):
     return -torch.finfo(tensor.dtype).max
 
-def l2norm(t):
-    return F.normalize(t, p = 2, dim = -1)
 
-def stable_softmax(t, dim = -1):
-    t = t - t.amax(dim = dim, keepdim = True).detach()
-    return F.softmax(t, dim = dim)
+def l2norm(t):
+    return F.normalize(t, p=2, dim=-1)
+
+
+def stable_softmax(t, dim=-1):
+    t = t - t.amax(dim=dim, keepdim=True).detach()
+    return F.softmax(t, dim=dim)
+
 
 # init helpers
+
 
 def init_zero_(layer):
     nn.init.constant_(layer.weight, 0.)
     if exists(layer.bias):
         nn.init.constant_(layer.bias, 0.)
 
+
 # keyword argument helpers
+
 
 def pick_and_pop(keys, d):
     values = list(map(lambda key: d.pop(key), keys))
     return dict(zip(keys, values))
 
+
 def group_dict_by_key(cond, d):
-    return_val = [dict(),dict()]
+    return_val = [dict(), dict()]
     for key in d.keys():
         match = bool(cond(key))
         ind = int(not match)
         return_val[ind][key] = d[key]
     return (*return_val,)
 
+
 def string_begins_with(prefix, str):
     return str.startswith(prefix)
 
+
 def group_by_key_prefix(prefix, d):
     return group_dict_by_key(partial(string_begins_with, prefix), d)
+
 
 def groupby_prefix_and_trim(prefix, d):
     kwargs_with_prefix, kwargs = group_dict_by_key(partial(string_begins_with, prefix), d)
     kwargs_without_prefix = dict(map(lambda x: (x[0][len(prefix):], x[1]), tuple(kwargs_with_prefix.items())))
     return kwargs_without_prefix, kwargs
 
+
 # activations
 
+
 class ReluSquared(nn.Module):
+
     def forward(self, x):
-        return F.relu(x) ** 2
+        return F.relu(x)**2
+
 
 # embedding
 
+
 class TokenEmbedding(nn.Module):
-    def __init__(self, dim, num_tokens, l2norm_embed = False):
+
+    def __init__(self, dim, num_tokens, l2norm_embed=False):
         super().__init__()
         self.l2norm_embed = l2norm_embed
         self.emb = nn.Embedding(num_tokens, dim)
@@ -118,40 +141,47 @@ class TokenEmbedding(nn.Module):
         token_emb = self.emb(x)
         return l2norm(token_emb) if self.l2norm_embed else token_emb
 
+
 # positional embeddings
 
+
 class AbsolutePositionalEmbedding(nn.Module):
-    def __init__(self, dim, max_seq_len, l2norm_embed = False):
+
+    def __init__(self, dim, max_seq_len, l2norm_embed=False):
         super().__init__()
-        self.scale = dim ** -0.5 if not l2norm_embed else 1.
+        self.scale = dim**-0.5 if not l2norm_embed else 1.
         self.l2norm_embed = l2norm_embed
         self.emb = nn.Embedding(max_seq_len, dim)
 
-    def forward(self, x, pos = None):
+    def forward(self, x, pos=None):
         if not exists(pos):
-            pos = torch.arange(x.shape[1], device = x.device)
+            pos = torch.arange(x.shape[1], device=x.device)
 
         pos_emb = self.emb(pos)
         pos_emb = pos_emb * self.scale
         return l2norm(pos_emb) if self.l2norm_embed else pos_emb
 
+
 class FixedPositionalEmbedding(nn.Module):
+
     def __init__(self, dim):
         super().__init__()
-        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        inv_freq = 1. / (10000**(torch.arange(0, dim, 2).float() / dim))
         self.register_buffer('inv_freq', inv_freq)
 
-    def forward(self, x, pos = None, seq_dim = 1, offset = 0):
+    def forward(self, x, pos=None, seq_dim=1, offset=0):
         if not exists(pos):
-            pos = torch.arange(x.shape[seq_dim], device = x.device)
+            pos = torch.arange(x.shape[seq_dim], device=x.device)
 
         pos = pos.type_as(self.inv_freq) + offset
         sinusoid_inp = pos.unsqueeze(-1) * self.inv_freq
         emb = torch.cat((sinusoid_inp.sin(), sinusoid_inp.cos()), dim=-1)
         return emb
 
+
 class RelativePositionBias(nn.Module):
-    def __init__(self, scale, causal = False, num_buckets = 32, max_distance = 128, heads = 8):
+
+    def __init__(self, scale, causal=False, num_buckets=32, max_distance=128, heads=8):
         super().__init__()
         self.scale = scale
         self.causal = causal
@@ -160,7 +190,7 @@ class RelativePositionBias(nn.Module):
         self.relative_attention_bias = nn.Embedding(num_buckets, heads)
 
     @staticmethod
-    def _relative_position_bucket(relative_position, causal = True, num_buckets = 32, max_distance = 128):
+    def _relative_position_bucket(relative_position, causal=True, num_buckets=32, max_distance=128):
         ret = 0
         n = -relative_position
         if not causal:
@@ -183,34 +213,30 @@ class RelativePositionBias(nn.Module):
 
     def forward(self, qk_dots):
         i, j, device = *qk_dots.shape[-2:], qk_dots.device
-        q_pos = torch.arange(i, dtype = torch.long, device = device)
-        k_pos = torch.arange(j, dtype = torch.long, device = device)
+        q_pos = torch.arange(i, dtype=torch.long, device=device)
+        k_pos = torch.arange(j, dtype=torch.long, device=device)
         rel_pos = k_pos[None, :] - q_pos[:, None]
-        rp_bucket = self._relative_position_bucket(rel_pos, causal = self.causal, num_buckets = self.num_buckets, max_distance = self.max_distance)
+        rp_bucket = self._relative_position_bucket(
+            rel_pos, causal=self.causal, num_buckets=self.num_buckets, max_distance=self.max_distance
+        )
         values = self.relative_attention_bias(rp_bucket)
         bias = rearrange(values, 'i j h -> h i j')
         return qk_dots + (bias * self.scale)
 
+
 class DynamicPositionBias(nn.Module):
-    def __init__(self, dim, *, heads, depth, log_distance = False, norm = False):
+
+    def __init__(self, dim, *, heads, depth, log_distance=False, norm=False):
         super().__init__()
         assert depth >= 1, 'depth for dynamic position bias MLP must be greater or equal to 1'
         self.log_distance = log_distance
 
         self.mlp = nn.ModuleList([])
 
-        self.mlp.append(nn.Sequential(
-            nn.Linear(1, dim),
-            nn.LayerNorm(dim) if norm else nn.Identity(),
-            nn.ReLU()
-        ))
+        self.mlp.append(nn.Sequential(nn.Linear(1, dim), nn.LayerNorm(dim) if norm else nn.Identity(), nn.ReLU()))
 
         for _ in range(depth - 1):
-            self.mlp.append(nn.Sequential(
-                nn.Linear(dim, dim),
-                nn.LayerNorm(dim) if norm else nn.Identity(),
-                nn.ReLU()
-            ))
+            self.mlp.append(nn.Sequential(nn.Linear(dim, dim), nn.LayerNorm(dim) if norm else nn.Identity(), nn.ReLU()))
 
         self.mlp.append(nn.Linear(dim, heads))
 
@@ -218,13 +244,13 @@ class DynamicPositionBias(nn.Module):
         n, device, dtype = qk_dots.shape[-1], qk_dots.device, qk_dots.dtype
 
         # get the (n x n) matrix of distances
-        seq_arange = torch.arange(n, device = device)
-        context_arange = torch.arange(n, device = device)
+        seq_arange = torch.arange(n, device=device)
+        context_arange = torch.arange(n, device=device)
         indices = rearrange(seq_arange, 'i -> i 1') - rearrange(context_arange, 'j -> 1 j')
         indices += (n - 1)
 
         # input to continuous positions MLP
-        pos = torch.arange(-n + 1, n, device = device, dtype = dtype)
+        pos = torch.arange(-n + 1, n, device=device, dtype=dtype)
         pos = rearrange(pos, '... -> ... 1')
 
         if self.log_distance:
@@ -233,38 +259,42 @@ class DynamicPositionBias(nn.Module):
         for layer in self.mlp:
             pos = layer(pos)
 
-        # get position biases        
+        # get position biases
         bias = pos[indices]
         bias = rearrange(bias, 'i j h -> h i j')
         return qk_dots + bias
 
+
 class AlibiPositionalBias(nn.Module):
+
     def __init__(self, heads, **kwargs):
         super().__init__()
         self.heads = heads
         slopes = torch.Tensor(self._get_slopes(heads))
         slopes = rearrange(slopes, 'h -> h 1 1')
-        self.register_buffer('slopes', slopes, persistent = False)
-        self.register_buffer('bias', None, persistent = False)
-    
+        self.register_buffer('slopes', slopes, persistent=False)
+        self.register_buffer('bias', None, persistent=False)
+
     def get_bias(self, i, j, device):
-        i_arange = torch.arange(i, device = device)
-        j_arange = torch.arange(j, device = device)
+        i_arange = torch.arange(i, device=device)
+        j_arange = torch.arange(j, device=device)
         bias = -torch.abs(rearrange(j_arange, 'j -> 1 1 j') - rearrange(i_arange, 'i -> 1 i 1'))
         return bias
 
     @staticmethod
     def _get_slopes(heads):
+
         def get_slopes_power_of_2(n):
-            start = (2**(-2**-(math.log2(n)-3)))
+            start = (2**(-2**-(math.log2(n) - 3)))
             ratio = start
-            return [start*ratio**i for i in range(n)]
+            return [start * ratio**i for i in range(n)]
 
         if math.log2(heads).is_integer():
             return get_slopes_power_of_2(heads)
 
-        closest_power_of_2 = 2 ** math.floor(math.log2(heads))
-        return get_slopes_power_of_2(closest_power_of_2) + get_slopes_power_of_2(2 * closest_power_of_2)[0::2][:heads-closest_power_of_2]
+        closest_power_of_2 = 2**math.floor(math.log2(heads))
+        return get_slopes_power_of_2(closest_power_of_2) + get_slopes_power_of_2(2 * closest_power_of_2
+                                                                                )[0::2][:heads - closest_power_of_2]
 
     def forward(self, qk_dots):
         h, i, j, device = *qk_dots.shape[-3:], qk_dots.device
@@ -281,7 +311,9 @@ class AlibiPositionalBias(nn.Module):
 
         return qk_dots + self.bias
 
+
 class LearnedAlibiPositionalBias(AlibiPositionalBias):
+
     def __init__(self, heads):
         super().__init__(heads)
         log_slopes = torch.log(self.slopes)
@@ -304,30 +336,37 @@ class LearnedAlibiPositionalBias(AlibiPositionalBias):
 
         return qk_dots + bias
 
+
 class RotaryEmbedding(nn.Module):
+
     def __init__(self, dim):
         super().__init__()
-        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        inv_freq = 1. / (10000**(torch.arange(0, dim, 2).float() / dim))
         self.register_buffer('inv_freq', inv_freq)
 
     def forward(self, max_seq_len, device):
-        t = torch.arange(max_seq_len, device = device).type_as(self.inv_freq)
+        t = torch.arange(max_seq_len, device=device).type_as(self.inv_freq)
         freqs = torch.einsum('i , j -> i j', t, self.inv_freq)
         return torch.cat((freqs, freqs), dim=-1)
 
+
 def rotate_half(x):
-    x = rearrange(x, '... (j d) -> ... j d', j = 2)
-    x1, x2 = x.unbind(dim = -2)
-    return torch.cat((-x2, x1), dim = -1)
+    x = rearrange(x, '... (j d) -> ... j d', j=2)
+    x1, x2 = x.unbind(dim=-2)
+    return torch.cat((-x2, x1), dim=-1)
+
 
 def apply_rotary_pos_emb(t, freqs):
     seq_len = t.shape[-2]
     freqs = freqs[-seq_len:, :]
     return (t * freqs.cos()) + (rotate_half(t) * freqs.sin())
 
+
 # norms
 
+
 class Scale(nn.Module):
+
     def __init__(self, value, fn):
         super().__init__()
         self.value = value
@@ -342,32 +381,39 @@ class Scale(nn.Module):
 
         return (scale_fn(out[0]), *out[1:])
 
+
 class ScaleNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-5):
+
+    def __init__(self, dim, eps=1e-5):
         super().__init__()
-        self.scale = dim ** -0.5
+        self.scale = dim**-0.5
         self.eps = eps
         self.g = nn.Parameter(torch.ones(1))
 
     def forward(self, x):
-        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
-        return x / norm.clamp(min = self.eps) * self.g
+        norm = torch.norm(x, dim=-1, keepdim=True) * self.scale
+        return x / norm.clamp(min=self.eps) * self.g
+
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-8):
+
+    def __init__(self, dim, eps=1e-8):
         super().__init__()
-        self.scale = dim ** -0.5
+        self.scale = dim**-0.5
         self.eps = eps
         self.g = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
-        return x / norm.clamp(min = self.eps) * self.g
+        norm = torch.norm(x, dim=-1, keepdim=True) * self.scale
+        return x / norm.clamp(min=self.eps) * self.g
+
 
 # residual and residual gates
 
+
 class Residual(nn.Module):
-    def __init__(self, dim, scale_residual = False, scale_residual_constant = 1.):
+
+    def __init__(self, dim, scale_residual=False, scale_residual_constant=1.):
         super().__init__()
         self.residual_scale = nn.Parameter(torch.ones(dim)) if scale_residual else None
         self.scale_residual_constant = scale_residual_constant
@@ -381,8 +427,10 @@ class Residual(nn.Module):
 
         return x + residual
 
+
 class GRUGating(nn.Module):
-    def __init__(self, dim, scale_residual = False, **kwargs):
+
+    def __init__(self, dim, scale_residual=False, **kwargs):
         super().__init__()
         self.gru = nn.GRUCell(dim, dim)
         self.residual_scale = nn.Parameter(torch.ones(dim)) if scale_residual else None
@@ -391,16 +439,15 @@ class GRUGating(nn.Module):
         if exists(self.residual_scale):
             residual = residual * self.residual_scale
 
-        gated_output = self.gru(
-            rearrange(x, 'b n d -> (b n) d'),
-            rearrange(residual, 'b n d -> (b n) d')
-        )
+        gated_output = self.gru(rearrange(x, 'b n d -> (b n) d'), rearrange(residual, 'b n d -> (b n) d'))
 
         return gated_output.reshape_as(x)
 
+
 # token shifting
 
-def shift(t, amount, mask = None):
+
+def shift(t, amount, mask=None):
     if amount == 0:
         return t
     else:
@@ -409,9 +456,11 @@ def shift(t, amount, mask = None):
     if exists(mask):
         t = t.masked_fill(~mask[..., None], 0.)
 
-    return F.pad(t, (0, 0, amount, -amount), value = 0.)
+    return F.pad(t, (0, 0, amount, -amount), value=0.)
+
 
 class ShiftTokens(nn.Module):
+
     def __init__(self, shifts, fn):
         super().__init__()
         self.fn = fn
@@ -422,37 +471,42 @@ class ShiftTokens(nn.Module):
         shifts = self.shifts
         segments = len(shifts)
         feats_per_shift = x.shape[-1] // segments
-        splitted = x.split(feats_per_shift, dim = -1)
+        splitted = x.split(feats_per_shift, dim=-1)
         segments_to_shift, rest = splitted[:segments], splitted[segments:]
-        segments_to_shift = list(map(lambda args: shift(*args, mask = mask), zip(segments_to_shift, shifts)))
-        x = torch.cat((*segments_to_shift, *rest), dim = -1)
+        segments_to_shift = list(map(lambda args: shift(*args, mask=mask), zip(segments_to_shift, shifts)))
+        x = torch.cat((*segments_to_shift, *rest), dim=-1)
         return self.fn(x, **kwargs)
+
 
 # feedforward
 
+
 class GLU(nn.Module):
+
     def __init__(self, dim_in, dim_out, activation):
         super().__init__()
         self.act = activation
         self.proj = nn.Linear(dim_in, dim_out * 2)
 
     def forward(self, x):
-        x, gate = self.proj(x).chunk(2, dim = -1)
+        x, gate = self.proj(x).chunk(2, dim=-1)
         return x * self.act(gate)
 
+
 class FeedForward(nn.Module):
+
     def __init__(
         self,
         dim,
-        dim_out = None,
-        mult = 4,
-        glu = False,
-        swish = False,
-        relu_squared = False,
-        post_act_ln = False,
-        dropout = 0.,
-        no_bias = False,
-        zero_init_output = False
+        dim_out=None,
+        mult=4,
+        glu=False,
+        swish=False,
+        relu_squared=False,
+        post_act_ln=False,
+        dropout=0.,
+        no_bias=False,
+        zero_init_output=False
     ):
         super().__init__()
         inner_dim = int(dim * mult)
@@ -472,9 +526,8 @@ class FeedForward(nn.Module):
 
         self.net = nn.Sequential(
             project_in,
-            nn.LayerNorm(inner_dim) if post_act_ln else nn.Identity(),
-            nn.Dropout(dropout),
-            nn.Linear(inner_dim, dim_out, bias = not no_bias)
+            nn.LayerNorm(inner_dim) if post_act_ln else nn.Identity(), nn.Dropout(dropout),
+            nn.Linear(inner_dim, dim_out, bias=not no_bias)
         )
 
         # init last linear layer to 0
@@ -485,33 +538,36 @@ class FeedForward(nn.Module):
         x = x @ self.net[-1].weight
         return self.net(x)
 
+
 # attention.
 
+
 class Attention(nn.Module):
+
     def __init__(
         self,
         dim,
-        dim_head = DEFAULT_DIM_HEAD,
-        heads = 8,
-        causal = False,
-        talking_heads = False,
-        head_scale = False,
-        sparse_topk = None,
-        use_entmax15 = False,
-        num_mem_kv = 0,
-        dropout = 0.,
-        on_attn = False,
-        gate_values = False,
-        zero_init_output = False,
-        max_attend_past = None,
-        qk_norm = False,
-        scale_init_value = None,
-        one_kv_head = False,
-        shared_kv = False,
-        value_dim_head = None,
+        dim_head=DEFAULT_DIM_HEAD,
+        heads=8,
+        causal=False,
+        talking_heads=False,
+        head_scale=False,
+        sparse_topk=None,
+        use_entmax15=False,
+        num_mem_kv=0,
+        dropout=0.,
+        on_attn=False,
+        gate_values=False,
+        zero_init_output=False,
+        max_attend_past=None,
+        qk_norm=False,
+        scale_init_value=None,
+        one_kv_head=False,
+        shared_kv=False,
+        value_dim_head=None,
     ):
         super().__init__()
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head**-0.5
 
         self.heads = heads
         self.causal = causal
@@ -527,11 +583,11 @@ class Attention(nn.Module):
             v_dim = value_dim_head
             out_dim = v_dim * heads
 
-        self.to_q = nn.Linear(dim, q_dim, bias = False)
-        self.to_k = nn.Linear(dim, k_dim * 2, bias = False)
+        self.to_q = nn.Linear(dim, q_dim, bias=False)
+        self.to_k = nn.Linear(dim, k_dim * 2, bias=False)
 
         # shared key / values, for further memory savings during inference
-        self.to_v = nn.Linear(dim, v_dim, bias = False)
+        self.to_v = nn.Linear(dim, v_dim, bias=False)
 
         # dropout
         self.dropout = nn.Dropout(dropout)
@@ -546,14 +602,16 @@ class Attention(nn.Module):
         # cosine sim attention
         self.qk_norm = qk_norm
         if qk_norm:
-            scale_init_value = default(scale_init_value, -3) # if not provided, initialize as though it were sequence length of 1024
+            scale_init_value = default(
+                scale_init_value, -3
+            )  # if not provided, initialize as though it were sequence length of 1024
             self.scale = nn.Parameter(torch.ones(1, heads, 1, 1) * scale_init_value)
 
         # talking heads
         self.talking_heads = talking_heads
         if talking_heads:
-            self.pre_softmax_talking_heads = nn.Conv2d(heads, heads, 1, bias = False)
-            self.post_softmax_talking_heads = nn.Conv2d(heads, heads, 1, bias = False)
+            self.pre_softmax_talking_heads = nn.Conv2d(heads, heads, 1, bias=False)
+            self.post_softmax_talking_heads = nn.Conv2d(heads, heads, 1, bias=False)
 
         # head scaling
         self.head_scale = head_scale
@@ -574,7 +632,8 @@ class Attention(nn.Module):
 
         # attention on attention
         self.attn_on_attn = on_attn
-        self.to_out = nn.Sequential(nn.Linear(out_dim, dim * 2, bias = False), nn.GLU()) if on_attn else nn.Linear(out_dim, dim, bias = False)
+        self.to_out = nn.Sequential(nn.Linear(out_dim, dim * 2, bias=False),
+                                    nn.GLU()) if on_attn else nn.Linear(out_dim, dim, bias=False)
 
         # init output projection 0
         if zero_init_output:
@@ -583,17 +642,19 @@ class Attention(nn.Module):
     def forward(
         self,
         x,
-        context = None,
-        mask = None,
-        context_mask = None,
-        attn_mask = None,
-        rel_pos = None,
-        sinusoidal_emb = None,
-        rotary_pos_emb = None,
-        prev_attn = None,
-        mem = None
+        context=None,
+        mask=None,
+        context_mask=None,
+        attn_mask=None,
+        rel_pos=None,
+        sinusoidal_emb=None,
+        rotary_pos_emb=None,
+        prev_attn=None,
+        mem=None
     ):
-        b, n, _, h, talking_heads, head_scale, scale, device, has_context = *x.shape, self.heads, self.talking_heads, self.head_scale, self.scale, x.device, exists(context)
+        b, n, _, h, talking_heads, head_scale, scale, device, has_context = *x.shape, self.heads, self.talking_heads, self.head_scale, self.scale, x.device, exists(
+            context
+        )
         kv_input = default(context, x)
 
         q_input = x
@@ -601,54 +662,56 @@ class Attention(nn.Module):
         v_input = kv_input
 
         if exists(mem):
-            k_input = torch.cat((mem, k_input), dim = -2)
-            v_input = torch.cat((mem, v_input), dim = -2)
+            k_input = torch.cat((mem, k_input), dim=-2)
+            v_input = torch.cat((mem, v_input), dim=-2)
 
         if exists(sinusoidal_emb):
             # in shortformer, the query would start at a position offset depending on the past cached memory
             offset = k_input.shape[-2] - q_input.shape[-2]
-            q_input = q_input + sinusoidal_emb(q_input, offset = offset)
+            q_input = q_input + sinusoidal_emb(q_input, offset=offset)
             k_input = k_input + sinusoidal_emb(k_input)
 
         q = self.to_q(q_input)
         k = self.to_k(k_input)
         v = self.to_v(v_input)
 
-        q = rearrange(q, 'b n (h d) -> b h n d', h = h)
+        q = rearrange(q, 'b n (h d) -> b h n d', h=h)
 
         if not self.one_kv_head:
-            k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (k, v))
+            k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=h), (k, v))
 
         if exists(rotary_pos_emb) and not has_context:
             l = rotary_pos_emb.shape[-1]
             (ql, qr), (kl, kr), (vl, vr) = map(lambda t: (t[..., :l], t[..., l:]), (q, k, v))
             ql, kl, vl = map(lambda t: apply_rotary_pos_emb(t, rotary_pos_emb), (ql, kl, vl))
-            q, k, v = map(lambda t: torch.cat(t, dim = -1), ((ql, qr), (kl, kr), (vl, vr)))
+            q, k, v = map(lambda t: torch.cat(t, dim=-1), ((ql, qr), (kl, kr), (vl, vr)))
 
         input_mask = None
         if any(map(exists, (mask, context_mask))):
-            q_mask = default(mask, lambda: torch.ones((b, n), device = device).bool())
+            q_mask = default(mask, lambda: torch.ones((b, n), device=device).bool())
             k_mask = q_mask if not exists(context) else context_mask
-            k_mask = default(k_mask, lambda: torch.ones((b, k.shape[-2]), device = device).bool())
+            k_mask = default(k_mask, lambda: torch.ones((b, k.shape[-2]), device=device).bool())
             q_mask = rearrange(q_mask, 'b i -> b 1 i 1')
             k_mask = rearrange(k_mask, 'b j -> b 1 1 j')
             input_mask = q_mask * k_mask
 
         if self.num_mem_kv > 0:
-            mem_k, mem_v = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), (self.mem_k, self.mem_v))
-            k = torch.cat((mem_k, k), dim = -2)
-            v = torch.cat((mem_v, v), dim = -2)
+            mem_k, mem_v = map(lambda t: repeat(t, 'h n d -> b h n d', b=b), (self.mem_k, self.mem_v))
+            k = torch.cat((mem_k, k), dim=-2)
+            v = torch.cat((mem_v, v), dim=-2)
             if exists(input_mask):
-                input_mask = F.pad(input_mask, (self.num_mem_kv, 0), value = True)
+                input_mask = F.pad(input_mask, (self.num_mem_kv, 0), value=True)
 
         if self.qk_norm:
             q, k = map(l2norm, (q, k))
-            scale = 1 / (self.scale.exp().clamp(min = 1e-2))
+            scale = 1 / (self.scale.exp().clamp(min=1e-2))
 
-        kv_einsum_eq = 'b h j d' if not self.one_kv_head else 'b j d'
-
-        k = rearrange(k, 'b h n (r d) -> b h n r d', r = 2)
-        dots = einsum(f'b h i d, b h j r d -> b h i j r', q, k) * scale
+        if self.one_kv_head:
+            k = rearrange(k, 'b n (r d) -> b n r d', r=2)
+            dots = einsum('b h i d, b j r d -> b h i j r', q, k) * scale
+        else:
+            k = rearrange(k, 'b h n (r d) -> b h n r d', r=2)
+            dots = einsum('b h i d, b h j r d -> b h i j r', q, k) * scale
 
         # dots, dots_gate = dots.unbind(dim = -1)
         dots = dots[..., 0]
@@ -681,8 +744,8 @@ class Attention(nn.Module):
 
         if exists(self.max_attend_past):
             i, j = dots.shape[-2:]
-            range_q = torch.arange(j - i, j, device = device)
-            range_k = torch.arange(j, device = device)
+            range_q = torch.arange(j - i, j, device=device)
+            range_k = torch.arange(j, device=device)
             dist = rearrange(range_q, 'i -> 1 1 i 1') - rearrange(range_k, 'j -> 1 1 1 j')
             mask = dist > self.max_attend_past
             dots.masked_fill_(mask, mask_value)
@@ -690,20 +753,20 @@ class Attention(nn.Module):
 
         if self.causal:
             i, j = dots.shape[-2:]
-            r = torch.arange(i, device = device)
+            r = torch.arange(i, device=device)
             mask = rearrange(r, 'i -> 1 1 i 1') < rearrange(r, 'j -> 1 1 1 j')
-            mask = F.pad(mask, (j - i, 0), value = False)
+            mask = F.pad(mask, (j - i, 0), value=False)
             dots.masked_fill_(mask, mask_value)
             del mask
 
         if exists(self.sparse_topk) and self.sparse_topk < dots.shape[-1]:
-            top, _ = dots.topk(self.sparse_topk, dim = -1)
+            top, _ = dots.topk(self.sparse_topk, dim=-1)
             vk = top[..., -1].unsqueeze(-1).expand_as(dots)
             mask = dots < vk
             dots.masked_fill_(mask, mask_value)
             del mask
 
-        attn = self.attn_fn(dots, dim = -1)
+        attn = self.attn_fn(dots, dim=-1)
         post_softmax_attn = attn.clone()
 
         attn = self.dropout(attn)
@@ -711,6 +774,7 @@ class Attention(nn.Module):
         if talking_heads:
             attn = self.post_softmax_talking_heads(attn)
 
+        kv_einsum_eq = 'b h j d' if not self.one_kv_head else 'b j d'
         out = einsum(f'b h i j, {kv_einsum_eq} -> b h i d', attn, v)
 
         if head_scale:
@@ -722,52 +786,51 @@ class Attention(nn.Module):
             gates = self.to_v_gate(x)
             out = out * gates.sigmoid()
 
-        intermediates = Intermediates(
-            pre_softmax_attn = pre_softmax_attn,
-            post_softmax_attn = post_softmax_attn
-        )
+        intermediates = Intermediates(pre_softmax_attn=pre_softmax_attn, post_softmax_attn=post_softmax_attn)
 
         return self.to_out(out), intermediates
 
+
 class AttentionLayers(nn.Module):
+
     def __init__(
         self,
         dim,
         depth,
-        heads = 8,
-        causal = False,
-        cross_attend = False,
-        only_cross = False,
-        use_scalenorm = False,
-        use_rmsnorm = False,
-        alibi_pos_bias = False,
-        alibi_num_heads = None,
-        alibi_learned = False,
-        rel_pos_bias = False,
-        rel_pos_num_buckets = 32,
-        rel_pos_max_distance = 128,
-        dynamic_pos_bias = False,
-        dynamic_pos_bias_log_distance = False,
-        dynamic_pos_bias_mlp_depth = 2,
-        dynamic_pos_bias_norm = False,
-        position_infused_attn = False,
-        rotary_pos_emb = False,
-        rotary_emb_dim = None,
-        custom_layers = None,
-        sandwich_coef = None,
-        par_ratio = None,
-        residual_attn = False,
-        cross_residual_attn = False,
-        macaron = False,
-        pre_norm = True,
-        gate_residual = False,
-        scale_residual = False,
-        scale_residual_constant = 1.,
-        shift_tokens = 0,
-        sandwich_norm = False,
-        use_qk_norm_attn = False,
-        qk_norm_attn_seq_len = None,
-        zero_init_branch_output = False,
+        heads=8,
+        causal=False,
+        cross_attend=False,
+        only_cross=False,
+        use_scalenorm=False,
+        use_rmsnorm=False,
+        alibi_pos_bias=False,
+        alibi_num_heads=None,
+        alibi_learned=False,
+        rel_pos_bias=False,
+        rel_pos_num_buckets=32,
+        rel_pos_max_distance=128,
+        dynamic_pos_bias=False,
+        dynamic_pos_bias_log_distance=False,
+        dynamic_pos_bias_mlp_depth=2,
+        dynamic_pos_bias_norm=False,
+        position_infused_attn=False,
+        rotary_pos_emb=False,
+        rotary_emb_dim=None,
+        custom_layers=None,
+        sandwich_coef=None,
+        par_ratio=None,
+        residual_attn=False,
+        cross_residual_attn=False,
+        macaron=False,
+        pre_norm=True,
+        gate_residual=False,
+        scale_residual=False,
+        scale_residual_constant=1.,
+        shift_tokens=0,
+        sandwich_norm=False,
+        use_qk_norm_attn=False,
+        qk_norm_attn_seq_len=None,
+        zero_init_branch_output=False,
         **kwargs
     ):
         super().__init__()
@@ -786,21 +849,35 @@ class AttentionLayers(nn.Module):
         rotary_emb_dim = max(default(rotary_emb_dim, dim_head // 2), 32)
         self.rotary_pos_emb = RotaryEmbedding(rotary_emb_dim) if rotary_pos_emb else None
 
-        assert not (alibi_pos_bias and rel_pos_bias), 'you can only choose Alibi positional bias or T5 relative positional bias, not both'
+        assert not (
+            alibi_pos_bias and rel_pos_bias
+        ), 'you can only choose Alibi positional bias or T5 relative positional bias, not both'
         assert rel_pos_num_buckets <= rel_pos_max_distance, 'number of relative position buckets must be less than the relative position max distance'
 
         # relative positional bias
 
         self.rel_pos = None
         if rel_pos_bias:
-            self.rel_pos = RelativePositionBias(scale = dim_head ** 0.5, causal = causal, heads = heads, num_buckets = rel_pos_num_buckets, max_distance = rel_pos_max_distance)
+            self.rel_pos = RelativePositionBias(
+                scale=dim_head**0.5,
+                causal=causal,
+                heads=heads,
+                num_buckets=rel_pos_num_buckets,
+                max_distance=rel_pos_max_distance
+            )
         elif dynamic_pos_bias:
-            self.rel_pos = DynamicPositionBias(dim = dim // 4, heads = heads, log_distance = dynamic_pos_bias_log_distance, depth = dynamic_pos_bias_mlp_depth, norm = dynamic_pos_bias_norm)
+            self.rel_pos = DynamicPositionBias(
+                dim=dim // 4,
+                heads=heads,
+                log_distance=dynamic_pos_bias_log_distance,
+                depth=dynamic_pos_bias_mlp_depth,
+                norm=dynamic_pos_bias_norm
+            )
         elif alibi_pos_bias:
             alibi_num_heads = default(alibi_num_heads, heads)
             assert alibi_num_heads <= heads, 'number of ALiBi heads must be less than the total number of heads'
             alibi_pos_klass = LearnedAlibiPositionalBias if alibi_learned else AlibiPositionalBias
-            self.rel_pos = alibi_pos_klass(heads = alibi_num_heads)
+            self.rel_pos = alibi_pos_klass(heads=alibi_num_heads)
 
         assert not (not pre_norm and sandwich_norm), 'sandwich norm cannot be used when not using prenorm'
         self.pre_norm = pre_norm
@@ -827,14 +904,15 @@ class AttentionLayers(nn.Module):
         # qk normalization
 
         if use_qk_norm_attn:
-            attn_scale_init_value = -math.log(math.log2(qk_norm_attn_seq_len ** 2 - qk_norm_attn_seq_len)) if exists(qk_norm_attn_seq_len) else None
+            attn_scale_init_value = -math.log(math.log2(qk_norm_attn_seq_len**2 - qk_norm_attn_seq_len)
+                                             ) if exists(qk_norm_attn_seq_len) else None
             attn_kwargs = {**attn_kwargs, 'qk_norm': True, 'scale_init_value': attn_scale_init_value}
 
         # zero init
 
         if zero_init_branch_output:
-            attn_kwargs = {**attn_kwargs, 'zero_init_output':  True}
-            ff_kwargs = {**ff_kwargs, 'zero_init_output':  True}
+            attn_kwargs = {**attn_kwargs, 'zero_init_output': True}
+            ff_kwargs = {**ff_kwargs, 'zero_init_output': True}
 
         # calculate layer block order
 
@@ -844,7 +922,7 @@ class AttentionLayers(nn.Module):
             par_depth = depth * len(default_block)
             assert 1 < par_ratio <= par_depth, 'par ratio out of range'
             default_block = tuple(filter(not_equals('f'), default_block))
-            par_attn  = par_depth // par_ratio
+            par_attn = par_depth // par_ratio
             depth_cut = par_depth * 2 // 3  # 2 / 3 attention layer cutoff suggested by PAR paper
             par_width = (depth_cut + depth_cut // par_attn) // par_attn
             assert len(default_block) <= par_width, 'default block is too large for par_ratio'
@@ -870,9 +948,9 @@ class AttentionLayers(nn.Module):
             is_last_layer = ind == (len(self.layer_types) - 1)
 
             if layer_type == 'a':
-                layer = Attention(dim, heads = heads, causal = causal, **attn_kwargs)
+                layer = Attention(dim, heads=heads, causal=causal, **attn_kwargs)
             elif layer_type == 'c':
-                layer = Attention(dim, heads = heads, **attn_kwargs)
+                layer = Attention(dim, heads=heads, **attn_kwargs)
             elif layer_type == 'f':
                 layer = FeedForward(dim, **ff_kwargs)
                 layer = layer if not macaron else Scale(0.5, layer)
@@ -885,7 +963,7 @@ class AttentionLayers(nn.Module):
                 layer = ShiftTokens(range(shift_range_lower, shift_range_upper), layer)
 
             residual_fn = GRUGating if gate_residual else Residual
-            residual = residual_fn(dim, scale_residual = scale_residual, scale_residual_constant = scale_residual_constant)
+            residual = residual_fn(dim, scale_residual=scale_residual, scale_residual_constant=scale_residual_constant)
 
             layer_uses_qk_norm = use_qk_norm_attn and layer_type in ('a', 'c')
 
@@ -893,28 +971,11 @@ class AttentionLayers(nn.Module):
             post_branch_norm = norm_fn() if sandwich_norm or layer_uses_qk_norm else None
             post_main_norm = norm_fn() if not pre_norm and not is_last_layer else None
 
-            norms = nn.ModuleList([
-                pre_branch_norm,
-                post_branch_norm,
-                post_main_norm
-            ])
+            norms = nn.ModuleList([pre_branch_norm, post_branch_norm, post_main_norm])
 
-            self.layers.append(nn.ModuleList([
-                norms,
-                layer,
-                residual
-            ]))
+            self.layers.append(nn.ModuleList([norms, layer, residual]))
 
-    def forward(
-        self,
-        x,
-        context = None,
-        mask = None,
-        context_mask = None,
-        attn_mask = None,
-        mems = None,
-        return_hiddens = False
-    ):
+    def forward(self, x, context=None, mask=None, context_mask=None, attn_mask=None, mems=None, return_hiddens=False):
         assert not (self.cross_attend ^ exists(context)), 'context must be passed in if cross_attend is set to True'
 
         hiddens = []
@@ -945,9 +1006,18 @@ class AttentionLayers(nn.Module):
                 x = pre_branch_norm(x)
 
             if layer_type == 'a':
-                out, inter = block(x, mask = mask, attn_mask = attn_mask, sinusoidal_emb = self.pia_pos_emb, rel_pos = self.rel_pos, rotary_pos_emb = rotary_pos_emb, prev_attn = prev_attn, mem = layer_mem)
+                out, inter = block(
+                    x,
+                    mask=mask,
+                    attn_mask=attn_mask,
+                    sinusoidal_emb=self.pia_pos_emb,
+                    rel_pos=self.rel_pos,
+                    rotary_pos_emb=rotary_pos_emb,
+                    prev_attn=prev_attn,
+                    mem=layer_mem
+                )
             elif layer_type == 'c':
-                out, inter = block(x, context = context, mask = mask, context_mask = context_mask, prev_attn = prev_cross_attn)
+                out, inter = block(x, context=context, mask=mask, context_mask=context_mask, prev_attn=prev_cross_attn)
             elif layer_type == 'f':
                 out = block(x)
 
@@ -968,47 +1038,44 @@ class AttentionLayers(nn.Module):
                 x = post_main_norm(x)
 
         if return_hiddens:
-            intermediates = LayerIntermediates(
-                hiddens = hiddens,
-                attn_intermediates = intermediates
-            )
+            intermediates = LayerIntermediates(hiddens=hiddens, attn_intermediates=intermediates)
 
             return x, intermediates
 
         return x
 
+
 class Encoder(AttentionLayers):
+
     def __init__(self, **kwargs):
         assert 'causal' not in kwargs, 'cannot set causality on encoder'
-        super().__init__(causal = False, **kwargs)
+        super().__init__(causal=False, **kwargs)
+
 
 class Decoder(AttentionLayers):
+
     def __init__(self, **kwargs):
         assert 'causal' not in kwargs, 'cannot set causality on decoder'
-        super().__init__(causal = True, **kwargs)
+        super().__init__(causal=True, **kwargs)
+
 
 class CrossAttender(AttentionLayers):
+
     def __init__(self, **kwargs):
-        super().__init__(cross_attend = True, only_cross = True, **kwargs)
+        super().__init__(cross_attend=True, only_cross=True, **kwargs)
+
 
 class ViTransformerWrapper(nn.Module):
+
     def __init__(
-        self,
-        *,
-        image_size,
-        patch_size,
-        attn_layers,
-        channels = 3,
-        num_classes = None,
-        dropout = 0.,
-        emb_dropout = 0.
+        self, *, image_size, patch_size, attn_layers, channels=3, num_classes=None, dropout=0., emb_dropout=0.
     ):
         super().__init__()
         assert isinstance(attn_layers, Encoder), 'attention layers must be an Encoder'
         assert image_size % patch_size == 0, 'image dimensions must be divisible by the patch size'
         dim = attn_layers.dim
-        num_patches = (image_size // patch_size) ** 2
-        patch_dim = channels * patch_size ** 2
+        num_patches = (image_size // patch_size)**2
+        patch_dim = channels * patch_size**2
 
         self.patch_size = patch_size
 
@@ -1020,14 +1087,10 @@ class ViTransformerWrapper(nn.Module):
         self.norm = nn.LayerNorm(dim)
         self.mlp_head = nn.Linear(dim, num_classes) if exists(num_classes) else nn.Identity()
 
-    def forward(
-        self,
-        img,
-        return_embeddings = False
-    ):
+    def forward(self, img, return_embeddings=False):
         p = self.patch_size
 
-        x = rearrange(img, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = p, p2 = p)
+        x = rearrange(img, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=p, p2=p)
         x = self.patch_to_embedding(x)
         n = x.shape[1]
 
@@ -1040,24 +1103,26 @@ class ViTransformerWrapper(nn.Module):
         if not exists(self.mlp_head) or return_embeddings:
             return x
 
-        x = x.mean(dim = -2)
+        x = x.mean(dim=-2)
         return self.mlp_head(x)
 
+
 class TransformerWrapper(nn.Module):
+
     def __init__(
         self,
         *,
         num_tokens,
         max_seq_len,
         attn_layers,
-        emb_dim = None,
-        max_mem_len = 0.,
-        shift_mem_down = 0,
-        emb_dropout = 0.,
-        num_memory_tokens = None,
-        tie_embedding = False,
-        use_abs_pos_emb = True,
-        l2norm_embed = False
+        emb_dim=None,
+        max_mem_len=0.,
+        shift_mem_down=0,
+        emb_dropout=0.,
+        num_memory_tokens=None,
+        tie_embedding=False,
+        use_abs_pos_emb=True,
+        l2norm_embed=False
     ):
         super().__init__()
         assert isinstance(attn_layers, AttentionLayers), 'attention layers must be one of Encoder or Decoder'
@@ -1070,8 +1135,9 @@ class TransformerWrapper(nn.Module):
         self.shift_mem_down = shift_mem_down
 
         self.l2norm_embed = l2norm_embed
-        self.token_emb = TokenEmbedding(emb_dim, num_tokens, l2norm_embed = l2norm_embed)
-        self.pos_emb = AbsolutePositionalEmbedding(emb_dim, max_seq_len, l2norm_embed = l2norm_embed) if (use_abs_pos_emb and not attn_layers.has_pos_emb) else always(0)
+        self.token_emb = TokenEmbedding(emb_dim, num_tokens, l2norm_embed=l2norm_embed)
+        self.pos_emb = AbsolutePositionalEmbedding(emb_dim, max_seq_len, l2norm_embed=l2norm_embed
+                                                  ) if (use_abs_pos_emb and not attn_layers.has_pos_emb) else always(0)
 
         self.emb_dropout = nn.Dropout(emb_dropout)
 
@@ -1091,9 +1157,9 @@ class TransformerWrapper(nn.Module):
 
     def init_(self):
         if self.l2norm_embed:
-            nn.init.normal_(self.token_emb.emb.weight, std = 1e-5)
+            nn.init.normal_(self.token_emb.emb.weight, std=1e-5)
             if not isinstance(self.pos_emb, always):
-                nn.init.normal_(self.pos_emb.emb.weight, std = 1e-5)
+                nn.init.normal_(self.pos_emb.emb.weight, std=1e-5)
             return
 
         nn.init.kaiming_normal_(self.token_emb.emb.weight)
@@ -1101,12 +1167,12 @@ class TransformerWrapper(nn.Module):
     def forward(
         self,
         x,
-        return_embeddings = False,
-        mask = None,
-        return_mems = False,
-        return_attn = False,
-        mems = None,
-        pos = None,
+        return_embeddings=False,
+        mask=None,
+        return_mems=False,
+        return_attn=False,
+        mems=None,
+        pos=None,
         **kwargs
     ):
         b, n, device, num_mem = *x.shape, x.device, self.num_memory_tokens
@@ -1115,7 +1181,7 @@ class TransformerWrapper(nn.Module):
         # absolute positional embedding
 
         external_pos_emb = exists(pos) and pos.dtype != torch.long
-        pos_emb = self.pos_emb(x, pos = pos) if not external_pos_emb else pos
+        pos_emb = self.pos_emb(x, pos=pos) if not external_pos_emb else pos
         x = self.token_emb(x) + pos_emb
 
         # embedding dropout
@@ -1125,21 +1191,21 @@ class TransformerWrapper(nn.Module):
         x = self.project_emb(x)
 
         if num_mem > 0:
-            mem = repeat(self.memory_tokens, 'n d -> b n d', b = b)
-            x = torch.cat((mem, x), dim = 1)
+            mem = repeat(self.memory_tokens, 'n d -> b n d', b=b)
+            x = torch.cat((mem, x), dim=1)
 
             # auto-handle masking after appending memory tokens
             if exists(mask):
-                mask = F.pad(mask, (num_mem, 0), value = True)
+                mask = F.pad(mask, (num_mem, 0), value=True)
 
         if self.shift_mem_down and exists(mems):
             mems_l, mems_r = mems[:self.shift_mem_down], mems[self.shift_mem_down:]
             mems = [*mems_r, *mems_l]
 
         if return_hiddens:
-            x, intermediates = self.attn_layers(x, mask = mask, mems = mems, return_hiddens = True, **kwargs)
+            x, intermediates = self.attn_layers(x, mask=mask, mems=mems, return_hiddens=True, **kwargs)
         else:
-            x = self.attn_layers(x, mask = mask, mems = mems, **kwargs)
+            x = self.attn_layers(x, mask=mask, mems=mems, **kwargs)
         x = self.norm(x)
 
         mem, x = x[:, :num_mem], x[:, num_mem:]
@@ -1148,7 +1214,7 @@ class TransformerWrapper(nn.Module):
 
         if return_mems:
             hiddens = intermediates.hiddens
-            new_mems = list(map(lambda pair: torch.cat(pair, dim = -2), zip(mems, hiddens))) if exists(mems) else hiddens
+            new_mems = list(map(lambda pair: torch.cat(pair, dim=-2), zip(mems, hiddens))) if exists(mems) else hiddens
             new_mems = list(map(lambda t: t[..., -self.max_mem_len:, :].detach(), new_mems))
             return out, new_mems
 
@@ -1158,17 +1224,19 @@ class TransformerWrapper(nn.Module):
 
         return out
 
+
 class ContinuousTransformerWrapper(nn.Module):
+
     def __init__(
         self,
         *,
         max_seq_len,
         attn_layers,
-        dim_in = None,
-        dim_out = None,
-        emb_dim = None,
-        emb_dropout = 0.,
-        use_abs_pos_emb = True
+        dim_in=None,
+        dim_out=None,
+        emb_dim=None,
+        emb_dropout=0.,
+        use_abs_pos_emb=True
     ):
         super().__init__()
         assert isinstance(attn_layers, AttentionLayers), 'attention layers must be one of Encoder or Decoder'
@@ -1177,7 +1245,9 @@ class ContinuousTransformerWrapper(nn.Module):
 
         self.max_seq_len = max_seq_len
 
-        self.pos_emb = AbsolutePositionalEmbedding(dim, max_seq_len) if (use_abs_pos_emb and not attn_layers.has_pos_emb) else always(0)
+        self.pos_emb = AbsolutePositionalEmbedding(dim,
+                                                   max_seq_len) if (use_abs_pos_emb and
+                                                                    not attn_layers.has_pos_emb) else always(0)
         self.emb_dropout = nn.Dropout(emb_dropout)
 
         self.project_in = nn.Linear(dim_in, dim) if exists(dim_in) else nn.Identity()
@@ -1187,23 +1257,14 @@ class ContinuousTransformerWrapper(nn.Module):
 
         self.project_out = nn.Linear(dim, dim_out) if exists(dim_out) else nn.Identity()
 
-    def forward(
-        self,
-        x,
-        return_embeddings = False,
-        mask = None,
-        return_attn = False,
-        mems = None,
-        pos = None,
-        **kwargs
-    ):
+    def forward(self, x, return_embeddings=False, mask=None, return_attn=False, mems=None, pos=None, **kwargs):
         b, n, _, device = *x.shape, x.device
 
         x = self.project_in(x)
-        x = x + self.pos_emb(x, pos = pos)
+        x = x + self.pos_emb(x, pos=pos)
         x = self.emb_dropout(x)
 
-        x, intermediates = self.attn_layers(x, mask = mask, mems = mems, return_hiddens = True, **kwargs)
+        x, intermediates = self.attn_layers(x, mask=mask, mems=mems, return_hiddens=True, **kwargs)
         x = self.norm(x)
 
         out = self.project_out(x) if not return_embeddings else x
@@ -1214,16 +1275,10 @@ class ContinuousTransformerWrapper(nn.Module):
 
         return out
 
+
 class XTransformer(nn.Module):
-    def __init__(
-        self,
-        *,
-        dim,
-        tie_token_emb = False,
-        ignore_index=-100,
-        pad_value=0,
-        **kwargs
-    ):
+
+    def __init__(self, *, dim, tie_token_emb=False, ignore_index=-100, pad_value=0, **kwargs):
         super().__init__()
         enc_kwargs, kwargs = groupby_prefix_and_trim('enc_', kwargs)
         dec_kwargs, kwargs = groupby_prefix_and_trim('dec_', kwargs)
@@ -1236,14 +1291,10 @@ class XTransformer(nn.Module):
         dec_transformer_kwargs = pick_and_pop(['num_tokens', 'max_seq_len'], dec_kwargs)
         dec_transformer_kwargs['emb_dropout'] = dec_kwargs.pop('emb_dropout', 0)
 
-        self.encoder = TransformerWrapper(
-            **enc_transformer_kwargs,
-            attn_layers = Encoder(dim = dim, **enc_kwargs)
-        )
+        self.encoder = TransformerWrapper(**enc_transformer_kwargs, attn_layers=Encoder(dim=dim, **enc_kwargs))
 
         self.decoder = TransformerWrapper(
-            **dec_transformer_kwargs,
-            attn_layers = Decoder(dim = dim, cross_attend = True, **dec_kwargs)
+            **dec_transformer_kwargs, attn_layers=Decoder(dim=dim, cross_attend=True, **dec_kwargs)
         )
 
         if tie_token_emb:
@@ -1252,11 +1303,11 @@ class XTransformer(nn.Module):
         self.decoder = AutoregressiveWrapper(self.decoder, ignore_index=ignore_index, pad_value=pad_value)
 
     @torch.no_grad()
-    def generate(self, seq_in, seq_out_start, seq_len, src_mask = None, src_attn_mask = None, **kwargs):
-        encodings = self.encoder(seq_in, mask = src_mask, attn_mask = src_attn_mask, return_embeddings = True)
-        return self.decoder.generate(seq_out_start, seq_len, context = encodings, context_mask = src_mask, **kwargs)
+    def generate(self, seq_in, seq_out_start, seq_len, src_mask=None, src_attn_mask=None, **kwargs):
+        encodings = self.encoder(seq_in, mask=src_mask, attn_mask=src_attn_mask, return_embeddings=True)
+        return self.decoder.generate(seq_out_start, seq_len, context=encodings, context_mask=src_mask, **kwargs)
 
-    def forward(self, src, tgt, src_mask = None, tgt_mask = None, src_attn_mask = None):
-        enc = self.encoder(src, mask = src_mask, attn_mask = src_attn_mask, return_embeddings = True)
-        out = self.decoder(tgt, context = enc, mask = tgt_mask, context_mask = src_mask)
+    def forward(self, src, tgt, src_mask=None, tgt_mask=None, src_attn_mask=None):
+        enc = self.encoder(src, mask=src_mask, attn_mask=src_attn_mask, return_embeddings=True)
+        out = self.decoder(tgt, context=enc, mask=tgt_mask, context_mask=src_mask)
         return out

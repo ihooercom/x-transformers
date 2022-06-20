@@ -16,34 +16,34 @@ NUM_BATCHES = int(1e5)
 BATCH_SIZE = 4
 GRADIENT_ACCUMULATE_EVERY = 4
 LEARNING_RATE = 1e-4
-VALIDATE_EVERY  = 100
-GENERATE_EVERY  = 500
+VALIDATE_EVERY = 100
+GENERATE_EVERY = 500
 GENERATE_LENGTH = 1024
 SEQ_LEN = 1024
 
 # helpers
+
 
 def cycle(loader):
     while True:
         for data in loader:
             yield data
 
+
 def decode_token(token):
     return str(chr(max(32, token)))
+
 
 def decode_tokens(tokens):
     return ''.join(list(map(decode_token, tokens)))
 
+
 # instantiate GPT-like decoder model
 
-model = TransformerWrapper(
-    num_tokens = 256,
-    max_seq_len = SEQ_LEN,
-    attn_layers = Decoder(dim = 512, depth = 6, heads = 8)
-)
+model = TransformerWrapper(num_tokens=256, max_seq_len=SEQ_LEN, attn_layers=Decoder(dim=512, depth=6, heads=8))
 
 model = AutoregressiveWrapper(model)
-model.cuda()
+model
 
 # prepare enwik8 data
 
@@ -52,7 +52,9 @@ with gzip.open('./data/enwik8.gz') as file:
     trX, vaX = np.split(X, [int(90e6)])
     data_train, data_val = torch.from_numpy(trX), torch.from_numpy(vaX)
 
+
 class TextSamplerDataset(Dataset):
+
     def __init__(self, data, seq_len):
         super().__init__()
         self.data = data
@@ -60,16 +62,17 @@ class TextSamplerDataset(Dataset):
 
     def __getitem__(self, index):
         rand_start = torch.randint(0, self.data.size(0) - self.seq_len - 1, (1,))
-        full_seq = self.data[rand_start: rand_start + self.seq_len + 1].long()
-        return full_seq.cuda()
+        full_seq = self.data[rand_start:rand_start + self.seq_len + 1].long()
+        return full_seq
 
     def __len__(self):
         return self.data.size(0) // self.seq_len
 
+
 train_dataset = TextSamplerDataset(data_train, SEQ_LEN)
-val_dataset   = TextSamplerDataset(data_val, SEQ_LEN)
-train_loader  = cycle(DataLoader(train_dataset, batch_size = BATCH_SIZE))
-val_loader    = cycle(DataLoader(val_dataset, batch_size = BATCH_SIZE))
+val_dataset = TextSamplerDataset(data_val, SEQ_LEN)
+train_loader = cycle(DataLoader(train_dataset, batch_size=BATCH_SIZE))
+val_loader = cycle(DataLoader(val_dataset, batch_size=BATCH_SIZE))
 
 # optimizer
 
